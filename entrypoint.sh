@@ -18,31 +18,33 @@ echo "=================================================="
 echo "--- NVIDIA Diagnostic ---"
 nvidia-smi || echo "nvidia-smi failed or not found"
 
-echo "--- Devices Diagnostic ---"
+echo "--- Initial Devices ---"
 ls -la /dev/nvidia* 2>&1 || echo "ls /dev/nvidia* failed"
-grep -i nvidia /proc/devices 2>&1 || echo "no nvidia in /proc/devices"
 
-echo "--- Checking /dev/nvidia-uvm ---"
-if [ ! -e /dev/nvidia-uvm ]; then
-  echo "/dev/nvidia-uvm is missing! Attempting creation..."
-  UVM_MAJOR=$(grep nvidia-uvm /proc/devices | awk '{print $1}')
-  if [ -n "$UVM_MAJOR" ]; then
-    echo "Found nvidia-uvm major $UVM_MAJOR, running mknod..."
-    mknod -m 666 /dev/nvidia-uvm c $UVM_MAJOR 0 2>&1 || echo "mknod /dev/nvidia-uvm failed"
-    mknod -m 666 /dev/nvidia-uvm-tools c $UVM_MAJOR 1 2>&1 || echo "mknod /dev/nvidia-uvm-tools failed"
-  else
-    echo "nvidia-uvm not found in /proc/devices, trying nvidia-modprobe..."
-    nvidia-modprobe -c 0 -u 2>&1 || echo "nvidia-modprobe failed"
-  fi
-else
-  echo "/dev/nvidia-uvm already exists."
+# Align device nodes: ensure /dev/nvidia0 through /dev/nvidia7 exist
+NV_DEVS=(/dev/nvidia[0-9]*)
+if [ -e "${NV_DEVS[0]}" ]; then
+  FIRST_DEV="${NV_DEVS[0]}"
+  echo "Found GPU device node: ${FIRST_DEV}"
+  for i in $(seq 0 7); do
+    if [ ! -e "/dev/nvidia${i}" ]; then
+      echo "Linking /dev/nvidia${i} -> ${FIRST_DEV}"
+      ln -sf "${FIRST_DEV}" "/dev/nvidia${i}" 2>/dev/null || true
+    fi
+  done
 fi
 
-echo "--- NVIDIA Libraries ---"
-ldconfig -p | grep -E "libcuda|libnvidia" || echo "no nvidia libs in ldconfig"
+echo "--- Aligned Devices ---"
+ls -la /dev/nvidia* 2>&1 || echo "ls /dev/nvidia* failed"
 
-echo "--- Testing NVENC with tdarr-ffmpeg ---"
+echo "--- Testing NVENC with tdarr-ffmpeg (default) ---"
 tdarr-ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
+
+echo "--- Testing NVENC with tdarr-ffmpeg (-gpu 0) ---"
+tdarr-ffmpeg -hide_banner -gpu 0 -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
+
+echo "--- Testing NVENC with tdarr-ffmpeg (-gpu 1) ---"
+tdarr-ffmpeg -hide_banner -gpu 1 -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
 echo "---------------------------------------"
 
 exec /app/Tdarr_Node/Tdarr_Node "$@"
