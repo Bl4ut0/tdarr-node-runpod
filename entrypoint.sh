@@ -28,7 +28,6 @@ if [ -e "${NV_DEVS[0]}" ]; then
   echo "Found GPU device node: ${FIRST_DEV}"
   for i in $(seq 0 7); do
     if [ ! -e "/dev/nvidia${i}" ]; then
-      echo "Linking /dev/nvidia${i} -> ${FIRST_DEV}"
       ln -sf "${FIRST_DEV}" "/dev/nvidia${i}" 2>/dev/null || true
     fi
   done
@@ -37,14 +36,31 @@ fi
 echo "--- Aligned Devices ---"
 ls -la /dev/nvidia* 2>&1 || echo "ls /dev/nvidia* failed"
 
-echo "--- Testing NVENC with tdarr-ffmpeg (default) ---"
-tdarr-ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
+# Test NVENC across combinations of CUDA_VISIBLE_DEVICES
+WORKING_CUDA_DEV=""
+for dev in "" "0" "1"; do
+  echo "--- Testing hevc_nvenc with CUDA_VISIBLE_DEVICES='${dev}' ---"
+  if [ -z "$dev" ]; then
+    unset CUDA_VISIBLE_DEVICES
+  else
+    export CUDA_VISIBLE_DEVICES="$dev"
+  fi
+  if tdarr-ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=1 -c:v hevc_nvenc -f null - 2>&1; then
+    echo "SUCCESS with CUDA_VISIBLE_DEVICES='${dev}'!"
+    WORKING_CUDA_DEV="$dev"
+    break
+  else
+    echo "Failed with CUDA_VISIBLE_DEVICES='${dev}'"
+  fi
+done
 
-echo "--- Testing NVENC with tdarr-ffmpeg (-gpu 0) ---"
-tdarr-ffmpeg -hide_banner -gpu 0 -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
-
-echo "--- Testing NVENC with tdarr-ffmpeg (-gpu 1) ---"
-tdarr-ffmpeg -hide_banner -gpu 1 -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
+if [ -n "$WORKING_CUDA_DEV" ]; then
+  echo "Setting persistent CUDA_VISIBLE_DEVICES=${WORKING_CUDA_DEV}"
+  export CUDA_VISIBLE_DEVICES="${WORKING_CUDA_DEV}"
+else
+  echo "Testing h264_nvenc default..."
+  tdarr-ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
+fi
 echo "---------------------------------------"
 
 exec /app/Tdarr_Node/Tdarr_Node "$@"
