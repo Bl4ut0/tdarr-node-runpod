@@ -4,6 +4,9 @@ LABEL org.opencontainers.image.source=https://github.com/Bl4ut0/tdarr-node-runpo
 LABEL org.opencontainers.image.description="Tdarr Node optimized for RunPod"
 LABEL org.opencontainers.image.licenses=MIT
 
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
