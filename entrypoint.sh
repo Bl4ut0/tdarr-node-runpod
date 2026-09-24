@@ -28,6 +28,50 @@ node_binary="${TDARR_NODE_BINARY:-/app/Tdarr_Node/Tdarr_Node}"
 original_cuda_visible_devices="${CUDA_VISIBLE_DEVICES-}"
 had_cuda_visible_devices="${CUDA_VISIBLE_DEVICES+x}"
 
+nvidia_device_dir="${NVIDIA_DEVICE_DIR:-/dev}"
+declare -a cuda_candidates=()
+
+add_cuda_candidate() {
+  local candidate="$1"
+  local existing
+  [ -n "${candidate}" ] || return 0
+  for existing in "${cuda_candidates[@]:-}"; do
+    [ "${existing}" = "${candidate}" ] && return 0
+  done
+  cuda_candidates+=("${candidate}")
+}
+
+# Try the configured visibility first, then discover every NVIDIA GPU index
+# and UUID reported by the driver. Device node suffixes can be non-zero
+# (for example /dev/nvidia4), so also probe every exposed GPU node slot.
+if [ -n "${had_cuda_visible_devices}" ]; then
+  add_cuda_candidate "${original_cuda_visible_devices}"
+else
+  add_cuda_candidate inherited
+fi
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  while IFS= read -r candidate; do
+    candidate="${candidate//[[:space:]]/}"
+    add_cuda_candidate "${candidate}"
+  done < <(nvidia-smi --query-gpu=index --format=csv,noheader,nounits 2>/dev/null || true)
+
+  while IFS= read -r candidate; do
+    candidate="${candidate//[[:space:]]/}"
+    add_cuda_candidate "${candidate}"
+  done < <(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null || true)
+fi
+
+for device_path in "${nvidia_device_dir}"/nvidia[0-9]*; do
+  [ -e "${device_path}" ] || continue
+  candidate="${device_path##*nvidia}"
+  add_cuda_candidate "${candidate}"
+done
+
+if [ "${#cuda_candidates[@]}" -eq 0 ]; then
+  add_cuda_candidate inherited
+fi
+
 probe_encoder() {
   local encoder="$1"
   tdarr-ffmpeg -hide_banner -loglevel error \
@@ -41,9 +85,9 @@ for ((attempt = 1; attempt <= probe_attempts; attempt++)); do
     nvidia-smi -L || true
   fi
 
-  # Keep the previous ordinal fallback for RunPod hosts with a non-zero CUDA
-  # device index, but start Tdarr only after both encoders pass on that index.
-  for candidate in inherited 0 1; do
+  # CUDA accepts both visible ordinals and GPU UUIDs. Probe all values found
+  # above so GPU numbering and /dev/nvidiaN suffixes do not have to start at 0.
+  for candidate in "${cuda_candidates[@]}"; do
     if [ "${candidate}" = inherited ]; then
       if [ -n "${had_cuda_visible_devices}" ]; then
         export CUDA_VISIBLE_DEVICES="${original_cuda_visible_devices}"
@@ -54,7 +98,7 @@ for ((attempt = 1; attempt <= probe_attempts; attempt++)); do
       export CUDA_VISIBLE_DEVICES="${candidate}"
     fi
 
-    echo "Testing CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+    echo "Testing CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} (candidate=${candidate})"
     if probe_encoder h264_nvenc && probe_encoder hevc_nvenc; then
       echo "H.264 and HEVC NVENC ready; registering Tdarr node"
       rm -f "${probe_log}"
