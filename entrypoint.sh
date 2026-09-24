@@ -1,66 +1,72 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
 if [ -z "${nodeName:-}" ] || [ "${nodeName}" = "runpod-nvenc-node" ]; then
-  POD_SUFFIX="${RUNPOD_POD_ID:-${HOSTNAME}}"
+  POD_SUFFIX="${RUNPOD_POD_ID:-${HOSTNAME:-unknown}}"
   export nodeName="runpod-nvenc-${POD_SUFFIX}"
 fi
 
-echo "=================================================="
-echo "Starting Tdarr Node for RunPod"
-echo "Node Name:   ${nodeName}"
-echo "Server URL:  ${serverURL:-Not set}"
-echo "Node Type:   ${nodeType:-unmapped}"
+echo "Starting Tdarr Node for RunPod: ${nodeName}"
+echo "Server URL: ${serverURL:-Not set}"
+echo "Node Type: ${nodeType:-unmapped}"
 echo "GPU Workers: ${transcodegpuWorkers:-1}"
 echo "CPU Workers: ${transcodecpuWorkers:-0}"
-echo "=================================================="
 
-echo "--- NVIDIA Diagnostic ---"
-nvidia-smi || echo "nvidia-smi failed or not found"
-
-echo "--- Initial Devices ---"
-ls -la /dev/nvidia* 2>&1 || echo "ls /dev/nvidia* failed"
-
-# Align device nodes: ensure /dev/nvidia0 through /dev/nvidia7 exist
-NV_DEVS=(/dev/nvidia[0-9]*)
-if [ -e "${NV_DEVS[0]}" ]; then
-  FIRST_DEV="${NV_DEVS[0]}"
-  echo "Found GPU device node: ${FIRST_DEV}"
-  for i in $(seq 0 7); do
-    if [ ! -e "/dev/nvidia${i}" ]; then
-      ln -sf "${FIRST_DEV}" "/dev/nvidia${i}" 2>/dev/null || true
-    fi
-  done
+# RunPod may attach the GPU shortly after the container starts. Never register
+# this node with Tdarr until both encoders can initialize a real GPU.
+probe_attempts="${NVENC_PROBE_ATTEMPTS:-12}"
+probe_interval="${NVENC_PROBE_INTERVAL_SECONDS:-5}"
+if ! [[ "${probe_attempts}" =~ ^[1-9][0-9]*$ ]] ||
+   ! [[ "${probe_interval}" =~ ^[0-9]+$ ]]; then
+  echo "Invalid NVENC probe retry settings" >&2
+  exit 2
 fi
 
-echo "--- Aligned Devices ---"
-ls -la /dev/nvidia* 2>&1 || echo "ls /dev/nvidia* failed"
+probe_log="$(mktemp)"
+trap 'rm -f "${probe_log}"' EXIT
+node_binary="${TDARR_NODE_BINARY:-/app/Tdarr_Node/Tdarr_Node}"
+original_cuda_visible_devices="${CUDA_VISIBLE_DEVICES-}"
+had_cuda_visible_devices="${CUDA_VISIBLE_DEVICES+x}"
 
-# Test NVENC across combinations of CUDA_VISIBLE_DEVICES
-WORKING_CUDA_DEV=""
-for dev in "" "0" "1"; do
-  echo "--- Testing hevc_nvenc with CUDA_VISIBLE_DEVICES='${dev}' ---"
-  if [ -z "$dev" ]; then
-    unset CUDA_VISIBLE_DEVICES
-  else
-    export CUDA_VISIBLE_DEVICES="$dev"
+probe_encoder() {
+  local encoder="$1"
+  tdarr-ffmpeg -hide_banner -loglevel error \
+    -f lavfi -i nullsrc=s=256x256:d=1 -frames:v 1 \
+    -c:v "${encoder}" -f null - >"${probe_log}" 2>&1
+}
+
+for ((attempt = 1; attempt <= probe_attempts; attempt++)); do
+  echo "NVENC readiness check ${attempt}/${probe_attempts}"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi -L || true
   fi
-  if tdarr-ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=1 -c:v hevc_nvenc -f null - 2>&1; then
-    echo "SUCCESS with CUDA_VISIBLE_DEVICES='${dev}'!"
-    WORKING_CUDA_DEV="$dev"
-    break
-  else
-    echo "Failed with CUDA_VISIBLE_DEVICES='${dev}'"
+
+  # Keep the previous ordinal fallback for RunPod hosts with a non-zero CUDA
+  # device index, but start Tdarr only after both encoders pass on that index.
+  for candidate in inherited 0 1; do
+    if [ "${candidate}" = inherited ]; then
+      if [ -n "${had_cuda_visible_devices}" ]; then
+        export CUDA_VISIBLE_DEVICES="${original_cuda_visible_devices}"
+      else
+        unset CUDA_VISIBLE_DEVICES
+      fi
+    else
+      export CUDA_VISIBLE_DEVICES="${candidate}"
+    fi
+
+    echo "Testing CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+    if probe_encoder h264_nvenc && probe_encoder hevc_nvenc; then
+      echo "H.264 and HEVC NVENC ready; registering Tdarr node"
+      rm -f "${probe_log}"
+      exec "${node_binary}" "$@"
+    fi
+  done
+
+  if ((attempt < probe_attempts)); then
+    sleep "${probe_interval}"
   fi
 done
 
-if [ -n "$WORKING_CUDA_DEV" ]; then
-  echo "Setting persistent CUDA_VISIBLE_DEVICES=${WORKING_CUDA_DEV}"
-  export CUDA_VISIBLE_DEVICES="${WORKING_CUDA_DEV}"
-else
-  echo "Testing h264_nvenc default..."
-  tdarr-ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=1 -c:v h264_nvenc -f null - 2>&1 || true
-fi
-echo "---------------------------------------"
-
-exec /app/Tdarr_Node/Tdarr_Node "$@"
+echo "NVENC unavailable after ${probe_attempts} checks; Tdarr node was not started" >&2
+cat "${probe_log}" >&2
+exit 1
