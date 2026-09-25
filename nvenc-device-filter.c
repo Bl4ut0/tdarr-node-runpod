@@ -230,10 +230,10 @@ int ioctl(int fd, unsigned long request, ...) {
     }
   }
 
-  if (_IOC_DIR(request) == _IOC_NONE && _IOC_SIZE(request) == 0) {
-    return real_ioctl(fd, request);
-  }
-
+  /* Do not infer that an ioctl has no third argument from _IOC_DIR/_IOC_SIZE.
+     NVIDIA's legacy control requests can use an argument even when those
+     encoding bits are zero. Dropping it breaks CUDA initialization before
+     the attached-GPU filter gets a chance to run. */
   va_list args;
   va_start(args, request);
   void *argument = va_arg(args, void *);

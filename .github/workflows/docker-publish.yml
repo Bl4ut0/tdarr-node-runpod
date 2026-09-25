@@ -25,6 +25,8 @@ jobs:
         run: |
           gcc -std=c11 -Wall -Wextra -DNVENC_FIX_TEST nvenc-device-filter.c -o /tmp/nvenc-filter-test
           /tmp/nvenc-filter-test
+          gcc -std=c11 -Wall -Wextra tests/nvenc-ioctl-forwarding-test.c -o /tmp/nvenc-ioctl-forwarding-test
+          /tmp/nvenc-ioctl-forwarding-test
           gcc -shared -fPIC -O2 -Wall -Wextra -o /tmp/nvenc-device-filter.so nvenc-device-filter.c -ldl
 
       - name: Set up Docker Buildx
