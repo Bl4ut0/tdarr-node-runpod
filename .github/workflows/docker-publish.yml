@@ -21,6 +21,12 @@ jobs:
       - name: Verify GPU startup gate
         run: bash tests/entrypoint-test.sh
 
+      - name: Verify NVENC device filter
+        run: |
+          gcc -std=c11 -Wall -Wextra -DNVENC_FIX_TEST nvenc-device-filter.c -o /tmp/nvenc-filter-test
+          /tmp/nvenc-filter-test
+          gcc -shared -fPIC -O2 -Wall -Wextra -o /tmp/nvenc-device-filter.so nvenc-device-filter.c -ldl
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

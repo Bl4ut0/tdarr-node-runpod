@@ -29,6 +29,7 @@ original_cuda_visible_devices="${CUDA_VISIBLE_DEVICES-}"
 had_cuda_visible_devices="${CUDA_VISIBLE_DEVICES+x}"
 
 nvidia_device_dir="${NVIDIA_DEVICE_DIR:-/dev}"
+nvidia_gpu_info_dir="${NVIDIA_GPU_INFO_DIR:-/proc/driver/nvidia/gpus}"
 declare -a cuda_candidates=()
 
 add_cuda_candidate() {
@@ -42,8 +43,8 @@ add_cuda_candidate() {
 }
 
 # Try the configured visibility first, then discover every NVIDIA GPU index
-# and UUID reported by the driver. Device node suffixes can be non-zero
-# (for example /dev/nvidia4), so also probe every exposed GPU node slot.
+# and UUID reported by the driver. The proc metadata scan below also finds
+# exposed GPUs mounted at nonzero device minors such as /dev/nvidia4.
 if [ -n "${had_cuda_visible_devices}" ]; then
   add_cuda_candidate "${original_cuda_visible_devices}"
 else
@@ -62,14 +63,38 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   done < <(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null || true)
 fi
 
-for device_path in "${nvidia_device_dir}"/nvidia[0-9]*; do
-  [ -e "${device_path}" ] || continue
-  candidate="${device_path##*nvidia}"
-  add_cuda_candidate "${candidate}"
+# /dev/nvidiaN uses the driver's device minor, which may differ from CUDA's
+# visible ordinal. Match every proc GPU entry to its mounted device node and
+# probe the UUID; never use the device minor as a CUDA ordinal.
+for info_path in "${nvidia_gpu_info_dir}"/*/information; do
+  [ -r "${info_path}" ] || continue
+  device_minor="$(awk -F: '/^[[:space:]]*Device Minor:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "${info_path}")"
+  gpu_uuid="$(awk -F: '/^[[:space:]]*GPU UUID:/ { sub(/^[[:space:]]*/, "", $2); print $2; exit }' "${info_path}")"
+  [ -n "${device_minor}" ] || continue
+  [ -e "${nvidia_device_dir}/nvidia${device_minor}" ] || continue
+  add_cuda_candidate "${gpu_uuid}"
+  echo "Mapped exposed /dev/nvidia${device_minor} to ${gpu_uuid:-an NVIDIA GPU UUID unavailable}"
 done
 
 if [ "${#cuda_candidates[@]}" -eq 0 ]; then
   add_cuda_candidate inherited
+fi
+
+# On affected NVIDIA drivers, NVENC sees the host-wide attached-GPU list even
+# inside a single-GPU container. This narrowly scoped ioctl interposer filters
+# that list using PCI bus metadata and the /dev/nvidiaN nodes mounted here.
+nvenc_filter_library="${NVENC_DEVICE_FILTER_LIBRARY:-/usr/local/lib/nvenc-device-filter.so}"
+export NVENC_FIX_DEVICE_DIR="${nvidia_device_dir}"
+export NVENC_FIX_GPU_INFO_DIR="${nvidia_gpu_info_dir}"
+if [ -r "${nvenc_filter_library}" ]; then
+  if [ -n "${LD_PRELOAD:-}" ]; then
+    export LD_PRELOAD="${nvenc_filter_library}:${LD_PRELOAD}"
+  else
+    export LD_PRELOAD="${nvenc_filter_library}"
+  fi
+  echo "Loaded container GPU enumeration filter: ${nvenc_filter_library}"
+else
+  echo "Container GPU enumeration filter missing at ${nvenc_filter_library}; NVENC readiness checks remain fail-closed" >&2
 fi
 
 probe_encoder() {
